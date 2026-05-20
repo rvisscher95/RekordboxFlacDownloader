@@ -137,28 +137,40 @@ class TestSearchFunction(unittest.TestCase):
 
 
 class TestGetDownloadUrl(unittest.TestCase):
-    @patch("downloader._get")
-    def test_returns_url_on_success(self, mock_get):
-        mock_get.return_value = {
-            "success": True,
-            "data": {"url": "https://cdn.example.com/file.flac"},
-        }
+    @patch("downloader._get_download_url_wjhe")
+    def test_returns_url_on_success(self, mock_wjhe):
+        mock_wjhe.return_value = "https://cdn.example.com/file.flac"
         url = get_download_url("12345", quality=QUALITY_FLAC_16)
         self.assertEqual(url, "https://cdn.example.com/file.flac")
-        mock_get.assert_called_once_with(
-            "/api/download-music",
-            params={"track_id": "12345", "quality": QUALITY_FLAC_16},
-        )
+        mock_wjhe.assert_called_once_with("12345", QUALITY_FLAC_16)
 
-    @patch("downloader._get")
-    def test_returns_none_on_failure(self, mock_get):
-        mock_get.return_value = {"success": False, "message": "not found"}
+    @patch("downloader._get_download_url_squid")
+    @patch("downloader._get_download_url_gdstudio")
+    @patch("downloader._get_download_url_wjhe")
+    def test_returns_none_on_failure(self, mock_wjhe, mock_gdstudio, mock_squid):
+        mock_wjhe.return_value = None
+        mock_gdstudio.return_value = None
+        mock_squid.return_value = None
         self.assertIsNone(get_download_url("99"))
 
-    @patch("downloader._get")
-    def test_returns_none_when_no_response(self, mock_get):
-        mock_get.return_value = None
+    @patch("downloader._get_download_url_squid")
+    @patch("downloader._get_download_url_gdstudio")
+    @patch("downloader._get_download_url_wjhe")
+    def test_returns_none_when_providers_raise(self, mock_wjhe, mock_gdstudio, mock_squid):
+        mock_wjhe.side_effect = Exception("connection error")
+        mock_gdstudio.side_effect = Exception("timeout")
+        mock_squid.side_effect = Exception("server error")
         self.assertIsNone(get_download_url("99"))
+
+    @patch("downloader._get_download_url_squid")
+    @patch("downloader._get_download_url_gdstudio")
+    @patch("downloader._get_download_url_wjhe")
+    def test_falls_back_to_next_provider(self, mock_wjhe, mock_gdstudio, mock_squid):
+        mock_wjhe.return_value = None
+        mock_gdstudio.return_value = "https://gdstudio.example.com/stream.flac"
+        url = get_download_url("12345", quality=QUALITY_FLAC_16)
+        self.assertEqual(url, "https://gdstudio.example.com/stream.flac")
+        mock_squid.assert_not_called()
 
 
 # ── rekordbox_db tests ────────────────────────────────────────────────────────
