@@ -406,6 +406,14 @@ class Track:
         self.isrc: str = raw.get("isrc", "")
         self.duration: int = raw.get("duration", 0)
         self.is_hires: bool = bool(raw.get("hires") or raw.get("hires_streamable"))
+        # Additional metadata
+        self.track_number: int = raw.get("track_number", 0)
+        self.disc_number: int = raw.get("media_number", 0)
+        self.composer: str = (raw.get("composer") or {}).get("name", "") if isinstance(raw.get("composer"), dict) else ""
+        genre = (album.get("genre") or {}) if isinstance(album, dict) else {}
+        self.genre: str = genre.get("name", "") if isinstance(genre, dict) else ""
+        self.release_date: str = (album.get("released_at") or album.get("release_date_original") or "") if isinstance(album, dict) else ""
+        self.label: str = (album.get("label") or {}).get("name", "") if isinstance(album, dict) and isinstance(album.get("label"), dict) else ""
         # Cover art URL
         image = album.get("image", {}) if isinstance(album, dict) else {}
         self.cover_url: str = (
@@ -603,6 +611,25 @@ def _write_metadata(filepath: Path, track: Track) -> None:
         audio["album"] = track.album
     if track.isrc:
         audio["isrc"] = track.isrc
+    if track.genre:
+        audio["genre"] = track.genre
+    if track.track_number:
+        audio["tracknumber"] = str(track.track_number)
+    if track.disc_number:
+        audio["discnumber"] = str(track.disc_number)
+    if track.composer:
+        audio["composer"] = track.composer
+    if track.release_date:
+        # Store full date and extract year
+        audio["date"] = track.release_date
+        year = track.release_date[:4] if len(track.release_date) >= 4 else ""
+        if year:
+            audio["year"] = year
+    if track.label:
+        audio["organization"] = track.label
+    if track.duration:
+        # Duration is informational, stored as a comment
+        audio["length"] = str(track.duration)
 
     if track.cover_url:
         try:

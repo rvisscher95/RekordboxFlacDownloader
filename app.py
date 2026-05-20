@@ -10,7 +10,10 @@ Requirements:
 
 import logging
 import os
+import platform
 import queue
+import shutil
+import subprocess
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -28,15 +31,37 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
+# Audio playback helper
+# --------------------------------------------------------------------------- #
+
+
+def _play_audio_file(filepath: str) -> None:
+    """Play an audio file using the system's default player."""
+    if not os.path.isfile(filepath):
+        messagebox.showerror("File not found", f"Cannot find file:\n{filepath}")
+        return
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            subprocess.Popen(["open", filepath])
+        elif system == "Windows":
+            os.startfile(filepath)
+        else:
+            subprocess.Popen(["xdg-open", filepath])
+    except Exception as exc:
+        messagebox.showerror("Playback error", f"Could not open file:\n{exc}")
+
+
+# --------------------------------------------------------------------------- #
 # Search dialog
 # --------------------------------------------------------------------------- #
 
 class SearchDialog(tk.Toplevel):
     """Modal dialog for searching and adding a new track to a playlist."""
 
-    def __init__(self, parent: "App", playlist_id: str, playlist_name: str):
+    def __init__(self, parent: "App", playlist_id: Optional[str], playlist_name: Optional[str]):
         super().__init__(parent)
-        self.title(f"Add track → {playlist_name}")
+        self.title("Search & Add Track")
         self.resizable(True, True)
         self.grab_set()   # modal
 
@@ -47,8 +72,8 @@ class SearchDialog(tk.Toplevel):
         self._selected_track: Optional[Track] = None
 
         self._build_ui()
-        self.geometry("700x460")
-        self.minsize(500, 360)
+        self.geometry("750x520")
+        self.minsize(550, 400)
 
     # ------------------------------------------------------------------ UI
 
@@ -79,6 +104,17 @@ class SearchDialog(tk.Toplevel):
         self._tree.pack(fill="both", expand=True, **pad)
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
 
+        # Playlist assignment
+        pl_frame = ttk.Frame(self)
+        pl_frame.pack(fill="x", **pad)
+        ttk.Label(pl_frame, text="Add to playlist:").pack(side="left")
+        self._playlist_var = tk.StringVar()
+        self._playlist_combo = ttk.Combobox(
+            pl_frame, textvariable=self._playlist_var, state="readonly", width=30
+        )
+        self._playlist_combo.pack(side="left", padx=4)
+        self._populate_playlist_combo()
+
         # Status label
         self._status_var = tk.StringVar(value="")
         ttk.Label(self, textvariable=self._status_var, foreground="gray").pack(**pad)
@@ -90,6 +126,19 @@ class SearchDialog(tk.Toplevel):
                                    command=self._do_add, state="disabled")
         self._add_btn.pack(side="right", padx=4)
         ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side="right")
+
+    def _populate_playlist_combo(self) -> None:
+        """Fill the playlist dropdown with non-folder playlists."""
+        playlists = [
+            pl for pl in self._parent._playlists if not pl.is_folder
+        ]
+        names = [pl.name for pl in playlists]
+        self._playlist_combo["values"] = names
+        self._pl_name_to_id = {pl.name: pl.id for pl in playlists}
+
+        # Pre-select current playlist if one was passed
+        if self._playlist_name and self._playlist_name in names:
+            self._playlist_var.set(self._playlist_name)
 
     # --------------------------------------------------------------- actions
 
@@ -128,6 +177,15 @@ class SearchDialog(tk.Toplevel):
     def _do_add(self) -> None:
         if self._selected_track is None:
             return
+
+        # Determine target playlist
+        selected_pl_name = self._playlist_var.get()
+        target_pl_id = self._pl_name_to_id.get(selected_pl_name)
+        if not target_pl_id:
+            messagebox.showwarning("No playlist", "Please select a playlist to add the track to.",
+                                   parent=self)
+            return
+
         self._add_btn.config(state="disabled")
         self._status_var.set("Downloading …")
         track = self._selected_track
@@ -138,11 +196,12 @@ class SearchDialog(tk.Toplevel):
                 output_dir=self._parent.download_dir,
                 quality=QUALITY_FLAC_16,
             )
-            self.after(0, self._finish_add, track, result_path)
+            self.after(0, self._finish_add, track, result_path, target_pl_id, selected_pl_name)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_add(self, track: Track, result_path: Optional[str]) -> None:
+    def _finish_add(self, track: Track, result_path: Optional[str],
+                    playlist_id: str, playlist_name: str) -> None:
         if result_path is None:
             self._status_var.set("Download failed.")
             messagebox.showerror("Download failed",
@@ -162,10 +221,11 @@ class SearchDialog(tk.Toplevel):
                 title=track.title,
                 artist=track.artist,
                 album=track.album,
+                genre=track.genre,
             )
             if track_id:
-                db.add_track_to_playlist(track_id, self._playlist_id)
-            self._parent.log(f"✓ Added: {track.display_name} → {self._playlist_name}")
+                db.add_track_to_playlist(track_id, playlist_id)
+            self._parent.log(f"✓ Added: {track.display_name} → {playlist_name}")
             self._parent.refresh_track_list()
             self.destroy()
         except Exception as exc:
@@ -183,8 +243,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("RekordboxFlacDownloader")
-        self.geometry("1050x680")
-        self.minsize(750, 500)
+        self.geometry("1150x720")
+        self.minsize(850, 550)
 
         # State
         self.db: Optional[RekordboxDatabase] = None
@@ -192,6 +252,8 @@ class App(tk.Tk):
         self._tracks: List[ContentTrack] = []
         self._playlist_map: Dict[str, Playlist] = {}  # id → Playlist
         self._active_playlist_id: Optional[str] = None
+        # Map track_id → downloaded FLAC path (for tracks downloaded this session)
+        self._downloaded_flacs: Dict[str, str] = {}
 
         # Download directory – default to ~/Music/RekordboxFlac
         self.download_dir = str(Path.home() / "Music" / "RekordboxFlac")
@@ -262,7 +324,7 @@ class App(tk.Tk):
 
         # Track list
         cols = ("status", "title", "artist", "album", "format", "path")
-        self._track_tree = ttk.Treeview(right, columns=cols, show="headings", height=16)
+        self._track_tree = ttk.Treeview(right, columns=cols, show="headings", height=14)
         self._track_tree.heading("status", text="")
         self._track_tree.heading("title", text="Title")
         self._track_tree.heading("artist", text="Artist")
@@ -270,11 +332,11 @@ class App(tk.Tk):
         self._track_tree.heading("format", text="Format")
         self._track_tree.heading("path", text="File path")
         self._track_tree.column("status", width=28, anchor="center", stretch=False)
-        self._track_tree.column("title", width=200)
-        self._track_tree.column("artist", width=160)
-        self._track_tree.column("album", width=140)
-        self._track_tree.column("format", width=60, anchor="center")
-        self._track_tree.column("path", width=300)
+        self._track_tree.column("title", width=180)
+        self._track_tree.column("artist", width=140)
+        self._track_tree.column("album", width=120)
+        self._track_tree.column("format", width=55, anchor="center")
+        self._track_tree.column("path", width=280)
         self._track_tree.pack(fill="both", expand=True)
 
         tr_scroll = ttk.Scrollbar(right, orient="vertical",
@@ -282,11 +344,38 @@ class App(tk.Tk):
         self._track_tree.configure(yscrollcommand=tr_scroll.set)
         tr_scroll.pack(side="right", fill="y")
 
+        # Track action buttons (below the track list)
+        track_btn_frame = ttk.Frame(right)
+        track_btn_frame.pack(fill="x", pady=(4, 0))
+
+        self._play_original_btn = ttk.Button(
+            track_btn_frame, text="▶ Play Original",
+            command=self._play_original, state="disabled")
+        self._play_original_btn.pack(side="left", padx=2)
+
+        self._play_flac_btn = ttk.Button(
+            track_btn_frame, text="▶ Play FLAC",
+            command=self._play_flac, state="disabled")
+        self._play_flac_btn.pack(side="left", padx=2)
+
+        self._delete_flac_btn = ttk.Button(
+            track_btn_frame, text="🗑 Delete FLAC",
+            command=self._delete_flac, state="disabled")
+        self._delete_flac_btn.pack(side="left", padx=2)
+
+        self._replace_btn = ttk.Button(
+            track_btn_frame, text="↔ Replace MP3 with FLAC",
+            command=self._replace_mp3, state="disabled")
+        self._replace_btn.pack(side="left", padx=2)
+
+        # Bind selection event
+        self._track_tree.bind("<<TreeviewSelect>>", self._on_track_select)
+
         # Bottom: log panel
         log_frame = ttk.LabelFrame(self, text="Log", padding=4)
         log_frame.pack(fill="x", padx=6, pady=(0, 6))
 
-        self._log_text = tk.Text(log_frame, height=7, state="disabled",
+        self._log_text = tk.Text(log_frame, height=6, state="disabled",
                                  wrap="word", font=("Courier", 9))
         self._log_text.pack(fill="both", expand=True, side="left")
         log_scroll = ttk.Scrollbar(log_frame, orient="vertical",
@@ -327,6 +416,30 @@ class App(tk.Tk):
 
     def _is_flac(self, track: ContentTrack) -> bool:
         return track.file_type == 5 or track.folder_path.lower().endswith(".flac")
+
+    def _get_selected_track(self) -> Optional[ContentTrack]:
+        """Return the currently selected track from the track tree."""
+        sel = self._track_tree.selection()
+        if not sel:
+            return None
+        track_id = sel[0]
+        return next((t for t in self._tracks if t.id == track_id), None)
+
+    def _get_flac_path_for_track(self, track: ContentTrack) -> Optional[str]:
+        """Return the FLAC download path for a track, if it exists."""
+        # Check session downloads
+        if track.id in self._downloaded_flacs:
+            path = self._downloaded_flacs[track.id]
+            if os.path.isfile(path):
+                return path
+        # Check download directory for matching file
+        from downloader import _sanitise_filename
+        safe_artist = _sanitise_filename(track.artist)
+        safe_title = _sanitise_filename(track.title)
+        candidate = Path(self.download_dir) / f"{safe_artist} - {safe_title}.flac"
+        if candidate.is_file():
+            return str(candidate)
+        return None
 
     # ------------------------------------------------------------------ open db
 
@@ -401,7 +514,6 @@ class App(tk.Tk):
             return
 
         # Build tree hierarchy — insert parents before children.
-        # Playlists whose parent_id is not in the map go at the root level.
         inserted = set()
         to_insert = list(playlists)
         while to_insert:
@@ -413,7 +525,6 @@ class App(tk.Tk):
                     if pl.parent_id in inserted:
                         parent_iid = pl.parent_id
                     else:
-                        # Parent not yet inserted — defer
                         remaining.append(pl)
                         continue
                 icon = "📁 " if pl.is_folder else "🎵 "
@@ -429,7 +540,6 @@ class App(tk.Tk):
                 except tk.TclError as exc:
                     logger.debug("Could not insert playlist %s: %s", pl.id, exc)
             to_insert = remaining
-            # If no progress was made this pass, force remaining at root level
             if len(inserted) == prev_count and to_insert:
                 for pl in to_insert:
                     icon = "📁 " if pl.is_folder else "🎵 "
@@ -462,6 +572,7 @@ class App(tk.Tk):
 
     def _load_track_list(self) -> None:
         self._track_tree.delete(*self._track_tree.get_children())
+        self._disable_track_buttons()
         if self.db is None or self._active_playlist_id is None:
             return
 
@@ -483,6 +594,156 @@ class App(tk.Tk):
 
     def refresh_track_list(self) -> None:
         self._load_track_list()
+
+    def _on_track_select(self, _event=None) -> None:
+        """Enable/disable track action buttons based on selection."""
+        track = self._get_selected_track()
+        if track is None:
+            self._disable_track_buttons()
+            return
+
+        # Play Original: always available if original file exists
+        has_original = bool(track.folder_path) and os.path.isfile(track.folder_path)
+        self._play_original_btn.config(state="normal" if has_original else "disabled")
+
+        # FLAC-related buttons
+        flac_path = self._get_flac_path_for_track(track)
+        has_flac = flac_path is not None
+
+        self._play_flac_btn.config(state="normal" if has_flac else "disabled")
+        self._delete_flac_btn.config(state="normal" if has_flac else "disabled")
+
+        # Replace: only makes sense if we have a FLAC and the track is not already FLAC
+        can_replace = has_flac and not self._is_flac(track)
+        self._replace_btn.config(state="normal" if can_replace else "disabled")
+
+    def _disable_track_buttons(self) -> None:
+        self._play_original_btn.config(state="disabled")
+        self._play_flac_btn.config(state="disabled")
+        self._delete_flac_btn.config(state="disabled")
+        self._replace_btn.config(state="disabled")
+
+    # ------------------------------------------------------------------ track actions
+
+    def _play_original(self) -> None:
+        """Play the original file (MP3 or whatever is in the database)."""
+        track = self._get_selected_track()
+        if track and track.folder_path:
+            self.log(f"▶ Playing original: {track.folder_path}")
+            _play_audio_file(track.folder_path)
+
+    def _play_flac(self) -> None:
+        """Play the downloaded FLAC file."""
+        track = self._get_selected_track()
+        if track is None:
+            return
+        flac_path = self._get_flac_path_for_track(track)
+        if flac_path:
+            self.log(f"▶ Playing FLAC: {flac_path}")
+            _play_audio_file(flac_path)
+        else:
+            messagebox.showinfo("No FLAC", "No downloaded FLAC file found for this track.")
+
+    def _delete_flac(self) -> None:
+        """Delete the downloaded FLAC file."""
+        track = self._get_selected_track()
+        if track is None:
+            return
+        flac_path = self._get_flac_path_for_track(track)
+        if not flac_path:
+            messagebox.showinfo("No FLAC", "No downloaded FLAC file found for this track.")
+            return
+
+        if not messagebox.askyesno(
+            "Confirm delete",
+            f"Delete downloaded FLAC file?\n\n{flac_path}",
+        ):
+            return
+
+        try:
+            os.unlink(flac_path)
+            # Remove from session tracking
+            self._downloaded_flacs.pop(track.id, None)
+            self.log(f"🗑 Deleted: {flac_path}", "ok")
+            # Refresh button states
+            self._on_track_select()
+        except OSError as exc:
+            messagebox.showerror("Delete error", f"Could not delete file:\n{exc}")
+            self.log(f"✗ Delete failed: {exc}", "err")
+
+    def _replace_mp3(self) -> None:
+        """
+        Replace the original MP3 with the downloaded FLAC.
+
+        This moves the FLAC file to the same directory as the original MP3
+        (with .flac extension), updates the Rekordbox database to point to
+        the new FLAC file, and removes the old MP3.
+        """
+        track = self._get_selected_track()
+        if track is None:
+            return
+
+        flac_path = self._get_flac_path_for_track(track)
+        if not flac_path:
+            messagebox.showinfo("No FLAC", "No downloaded FLAC file found for this track.")
+            return
+
+        original_path = track.folder_path
+        if not original_path:
+            messagebox.showerror("Error", "Original file path is empty in the database.")
+            return
+
+        # Determine destination: same directory as original, but with .flac extension
+        original_p = Path(original_path)
+        dest_dir = original_p.parent
+        dest_filename = original_p.stem + ".flac"
+        dest_path = dest_dir / dest_filename
+
+        confirm_msg = (
+            f"Replace original with FLAC?\n\n"
+            f"Original: {original_path}\n"
+            f"FLAC: {flac_path}\n\n"
+            f"The FLAC will be moved to:\n{dest_path}\n\n"
+            f"The Rekordbox database will be updated."
+        )
+        if not messagebox.askyesno("Confirm replace", confirm_msg):
+            return
+
+        try:
+            # Ensure destination directory exists
+            dest_dir.mkdir(parents=True, exist_ok=True)
+
+            # Move FLAC to destination
+            shutil.move(flac_path, str(dest_path))
+            self.log(f"Moved FLAC to: {dest_path}")
+
+            # Update rekordbox database
+            if self.db is None:
+                messagebox.showerror("Error", "Database not open.")
+                return
+            self.db.update_track_path(track.id, str(dest_path))
+            self.log(f"✓ Database updated: {track.title} → FLAC", "ok")
+
+            # Remove original MP3 (if it still exists and is different from dest)
+            if original_p.exists() and original_p != dest_path:
+                try:
+                    original_p.unlink()
+                    self.log(f"Removed original: {original_path}")
+                except OSError as exc:
+                    self.log(f"Warning: could not remove original: {exc}", "err")
+
+            # Clean up session tracking
+            self._downloaded_flacs.pop(track.id, None)
+
+            # Refresh the track list
+            self.refresh_track_list()
+
+        except OSError as exc:
+            messagebox.showerror("Replace error", f"Could not replace file:\n{exc}")
+            self.log(f"✗ Replace failed: {exc}", "err")
+        except Exception as exc:
+            messagebox.showerror("Error", f"Unexpected error:\n{exc}")
+            self.log(f"✗ Replace failed: {exc}", "err")
 
     # ------------------------------------------------------------------ download
 
@@ -511,8 +772,9 @@ class App(tk.Tk):
         # Confirm before batch download
         if not messagebox.askyesno(
             "Confirm download",
-            f"Replace {len(to_replace)} non-FLAC track(s) with FLAC versions?\n\n"
-            f"Download directory: {self.download_dir}",
+            f"Download FLAC versions of {len(to_replace)} non-FLAC track(s)?\n\n"
+            f"Download directory: {self.download_dir}\n\n"
+            f"(Use 'Replace MP3 with FLAC' button to actually replace them in Rekordbox.)",
         ):
             return
 
@@ -541,7 +803,6 @@ class App(tk.Tk):
                 fail_count += 1
                 continue
 
-            # Pick the best match (first result, or artist match if possible).
             best = self._pick_best_match(results, track)
             if best is None:
                 self.log(f"  ✗ No suitable match: {track.artist} – {track.title}", "err")
@@ -566,19 +827,15 @@ class App(tk.Tk):
                 fail_count += 1
                 continue
 
-            # Update the database
-            try:
-                self.db.update_track_path(track.id, result_path)
-                self.log(
-                    f"  ✓ Replaced: {track.artist} – {track.title} → FLAC", "ok"
-                )
-                ok_count += 1
-            except Exception as exc:
-                self.log(f"  ✗ DB update failed ({track.id}): {exc}", "err")
-                fail_count += 1
+            # Track the downloaded FLAC
+            self._downloaded_flacs[track.id] = result_path
+            self.log(
+                f"  ✓ Downloaded: {track.artist} – {track.title}", "ok"
+            )
+            ok_count += 1
 
         summary = (
-            f"Batch complete: {ok_count} replaced, {fail_count} failed "
+            f"Batch complete: {ok_count} downloaded, {fail_count} failed "
             f"(out of {total} tracks)."
         )
         self.log(summary, "ok" if fail_count == 0 else "info")
@@ -609,14 +866,17 @@ class App(tk.Tk):
     # ------------------------------------------------------------------ add track
 
     def _open_search(self) -> None:
-        if self.db is None or self._active_playlist_id is None:
-            messagebox.showinfo("No playlist selected",
-                                "Please select a playlist first.")
+        if self.db is None:
+            messagebox.showinfo("No database",
+                                "Please open a Rekordbox database first.")
             return
-        pl = self._playlist_map.get(self._active_playlist_id)
-        if pl is None:
-            return
-        SearchDialog(self, self._active_playlist_id, pl.name)
+        pl_id = self._active_playlist_id
+        pl_name = None
+        if pl_id:
+            pl = self._playlist_map.get(pl_id)
+            if pl:
+                pl_name = pl.name
+        SearchDialog(self, pl_id, pl_name)
 
 
 # --------------------------------------------------------------------------- #
