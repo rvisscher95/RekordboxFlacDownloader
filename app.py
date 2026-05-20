@@ -352,7 +352,9 @@ class App(tk.Tk):
             logger.exception("Could not open database")
             messagebox.showerror("Database error",
                                  f"Could not open database:\n{exc}\n\n"
-                                 "For Rekordbox 6/7 you need pyrekordbox with SQLCipher support.")
+                                 "Rekordbox 6/7 databases are encrypted.\n"
+                                 "Install the required packages to decrypt automatically:\n\n"
+                                 "  pip install pyrekordbox sqlcipher3-wheels")
             self._db_var.set("— error —")
             return
 

@@ -1,3 +1,4 @@
 pyrekordbox>=0.3.0
+sqlcipher3-wheels>=0.5.0
 requests>=2.28.0
 mutagen>=1.47.0

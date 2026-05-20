@@ -56,13 +56,13 @@ class ContentTrack:
 
 class RekordboxDatabase:
     """
-    Thin wrapper around both pyrekordbox's ``MasterDatabase`` and a plain
+    Thin wrapper around both pyrekordbox's ``Rekordbox6Database`` and a plain
     sqlite3 connection so that higher-level code stays database-agnostic.
     """
 
     def __init__(self, db_path: str):
         self._path = str(db_path)
-        self._pyrekordbox_db = None  # MasterDatabase instance (if available)
+        self._pyrekordbox_db = None  # Rekordbox6Database instance (if available)
         self._sqlite_conn = None     # plain sqlite3 connection (fallback)
         self._open()
 
@@ -71,9 +71,9 @@ class RekordboxDatabase:
     def _open(self) -> None:
         """Try pyrekordbox first (handles encryption); fall back to sqlite3."""
         try:
-            from pyrekordbox import MasterDatabase
-            logger.debug("Opening %s via pyrekordbox …", self._path)
-            self._pyrekordbox_db = MasterDatabase(path=self._path)
+            from pyrekordbox import Rekordbox6Database
+            logger.debug("Opening %s via pyrekordbox (with decryption) …", self._path)
+            self._pyrekordbox_db = Rekordbox6Database(path=self._path)
             logger.info("Opened Rekordbox database via pyrekordbox: %s", self._path)
             return
         except ImportError:
@@ -95,8 +95,10 @@ class RekordboxDatabase:
             self._sqlite_conn.close()
             self._sqlite_conn = None
             raise RuntimeError(
-                f"Cannot read database (it may be encrypted): {exc}\n"
-                "Install pyrekordbox with sqlcipher3 for Rekordbox 6/7 support."
+                f"Cannot read database (it is likely encrypted): {exc}\n\n"
+                "Rekordbox 6/7 databases are encrypted. To decrypt automatically:\n"
+                "  pip install pyrekordbox sqlcipher3-wheels\n\n"
+                "The tool will then decrypt the database using the built-in key."
             ) from exc
 
     # --------------------------------------------------------------- helpers
@@ -248,16 +250,23 @@ class RekordboxDatabase:
     ) -> Optional[str]:
         db = self._pyrekordbox_db
         try:
-            djm_artist = _get_or_create_artist(db, artist)
-            djm_album = _get_or_create_album(db, album, djm_artist.ID)
-            djm_genre = _get_or_create_genre(db, genre) if genre else None
-            content = db.add_content(
-                path=file_path,
-                Title=title,
-                Artist=djm_artist,
-                Album=djm_album,
-                Genre=djm_genre,
-            )
+            # Build kwargs for add_content with direct field names
+            kwargs = {"Title": title}
+            if artist:
+                djm_artist = _get_or_create_artist(db, artist)
+                kwargs["ArtistID"] = djm_artist.ID
+                kwargs["ArtistName"] = artist
+            if album:
+                artist_id = kwargs.get("ArtistID")
+                djm_album = _get_or_create_album(db, album, artist_id)
+                kwargs["AlbumID"] = djm_album.ID
+                kwargs["AlbumName"] = album
+            if genre:
+                djm_genre = _get_or_create_genre(db, genre)
+                kwargs["GenreID"] = djm_genre.ID
+                kwargs["GenreName"] = genre
+
+            content = db.add_content(path=file_path, **kwargs)
             db.commit()
             return str(content.ID)
         except Exception as exc:
@@ -399,12 +408,12 @@ def _get_or_create_artist(db, name: str):
 
 
 def _get_or_create_album(db, name: str, artist_id):
-    album = db.get_album(Name=name, AlbumArtistID=artist_id)
+    album = db.get_album(Name=name)
     if hasattr(album, "first"):
         album = album.first()
     if album is not None:
         return album
-    return db.add_album(name, artist_id)
+    return db.add_album(name, artist=artist_id)
 
 
 def _get_or_create_genre(db, name: str):

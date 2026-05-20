@@ -109,6 +109,7 @@ python -m pytest tests.py -v
 | Package | Purpose |
 |---------|---------|
 | `pyrekordbox` | Read/write Rekordbox 6/7 databases (handles SQLCipher encryption) |
+| `sqlcipher3-wheels` | Provides SQLCipher decryption support — automatically decrypts Rekordbox 6/7 databases |
 | `requests` | HTTP calls to the Qobuz proxy API |
 | `mutagen` | Embed metadata (title, artist, cover art) into downloaded FLAC files |
 
