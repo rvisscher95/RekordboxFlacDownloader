@@ -86,6 +86,19 @@ class RekordboxDatabase:
         self._sqlite_conn.row_factory = _sqlite3.Row
         logger.info("Opened Rekordbox database via sqlite3: %s", self._path)
 
+        # Verify the database is readable by checking for the expected table
+        try:
+            self._sqlite_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='djmdPlaylist'"
+            ).fetchone()
+        except _sqlite3.DatabaseError as exc:
+            self._sqlite_conn.close()
+            self._sqlite_conn = None
+            raise RuntimeError(
+                f"Cannot read database (it may be encrypted): {exc}\n"
+                "Install pyrekordbox with sqlcipher3 for Rekordbox 6/7 support."
+            ) from exc
+
     # --------------------------------------------------------------- helpers
 
     @property
@@ -111,12 +124,17 @@ class RekordboxDatabase:
         results: List[Playlist] = []
         for pl in db.get_playlist():
             # Skip special rekordbox system entries
-            if str(pl.ID) in ("100000", "200000"):
+            pl_id = str(pl.ID)
+            if pl_id in ("root", "0", "100000", "200000"):
                 continue
+            parent_id = str(pl.ParentID) if pl.ParentID else None
+            # Treat "root" or "0" parent as top-level
+            if parent_id in ("root", "0"):
+                parent_id = None
             results.append(Playlist(
-                id=str(pl.ID),
+                id=pl_id,
                 name=pl.Name or "",
-                parent_id=str(pl.ParentID) if pl.ParentID else None,
+                parent_id=parent_id,
                 is_folder=(getattr(pl, "Attribute", 0) == 1),
             ))
         return results
@@ -127,12 +145,17 @@ class RekordboxDatabase:
         )
         results = []
         for r in rows:
-            if str(r["ID"]) in ("100000", "200000"):
+            pl_id = str(r["ID"])
+            if pl_id in ("root", "0", "100000", "200000"):
                 continue
+            parent_id = str(r["ParentID"]) if r["ParentID"] else None
+            # Treat "root" or "0" parent as top-level
+            if parent_id in ("root", "0"):
+                parent_id = None
             results.append(Playlist(
-                id=str(r["ID"]),
+                id=pl_id,
                 name=r["Name"] or "",
-                parent_id=str(r["ParentID"]) if r["ParentID"] else None,
+                parent_id=parent_id,
                 is_folder=(r["Attribute"] == 1),
             ))
         return results

@@ -288,5 +288,95 @@ class TestRekordboxDatabaseSqlite(unittest.TestCase):
         self.assertEqual(len(tracks), 2)
 
 
+class TestRekordboxDatabaseRootPlaylist(unittest.TestCase):
+    """Test that 'root' and '0' parent/IDs are handled correctly (Rekordbox 6/7 schema)."""
+
+    def setUp(self):
+        fd, self._db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        conn = sqlite3.connect(self._db_path)
+        conn.executescript(
+            """
+            CREATE TABLE djmdPlaylist (
+                ID TEXT PRIMARY KEY,
+                Name TEXT,
+                ParentID TEXT,
+                Attribute INTEGER DEFAULT 0,
+                Seq INTEGER DEFAULT 0,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE djmdContent (
+                ID TEXT PRIMARY KEY,
+                Title TEXT,
+                ArtistName TEXT,
+                AlbumName TEXT,
+                FolderPath TEXT,
+                FileType INTEGER DEFAULT 1,
+                SampleRate INTEGER DEFAULT 44100,
+                BitRate INTEGER DEFAULT 0,
+                BPM REAL DEFAULT 0,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE djmdSongPlaylist (
+                ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                PlaylistID TEXT,
+                ContentID TEXT,
+                TrackNo INTEGER DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT
+            );
+
+            -- Simulate a Rekordbox 6/7 structure with root node
+            INSERT INTO djmdPlaylist VALUES
+                ('root', 'Root', NULL, 4, 0, datetime('now'), datetime('now')),
+                ('100000', 'CloudSync', 'root', 0, 0, datetime('now'), datetime('now')),
+                ('200000', 'CueAnalysis', 'root', 0, 0, datetime('now'), datetime('now')),
+                ('3', 'My Folder', 'root', 1, 1, datetime('now'), datetime('now')),
+                ('4', 'Techno', '3', 0, 1, datetime('now'), datetime('now')),
+                ('5', 'House', 'root', 0, 2, datetime('now'), datetime('now'));
+            """
+        )
+        conn.commit()
+        conn.close()
+        with patch.dict("sys.modules", {"pyrekordbox": None}):
+            self.rdb = RekordboxDatabase(self._db_path)
+
+    def tearDown(self):
+        self.rdb.close()
+        os.unlink(self._db_path)
+
+    def test_root_entry_excluded(self):
+        playlists = self.rdb.get_playlists()
+        ids = [p.id for p in playlists]
+        self.assertNotIn("root", ids)
+        self.assertNotIn("100000", ids)
+        self.assertNotIn("200000", ids)
+
+    def test_top_level_playlists_have_no_parent(self):
+        playlists = self.rdb.get_playlists()
+        folder = next(p for p in playlists if p.name == "My Folder")
+        house = next(p for p in playlists if p.name == "House")
+        # These should be at root level (parent_id=None) because their
+        # parent is 'root' which is excluded
+        self.assertIsNone(folder.parent_id)
+        self.assertIsNone(house.parent_id)
+
+    def test_nested_playlist_has_correct_parent(self):
+        playlists = self.rdb.get_playlists()
+        techno = next(p for p in playlists if p.name == "Techno")
+        self.assertEqual(techno.parent_id, "3")
+
+    def test_folder_attribute_detected(self):
+        playlists = self.rdb.get_playlists()
+        folder = next(p for p in playlists if p.name == "My Folder")
+        self.assertTrue(folder.is_folder)
+
+    def test_only_user_playlists_returned(self):
+        playlists = self.rdb.get_playlists()
+        self.assertEqual(len(playlists), 3)  # My Folder, Techno, House
+
+
 if __name__ == "__main__":
     unittest.main()

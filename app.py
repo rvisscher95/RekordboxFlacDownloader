@@ -367,23 +367,81 @@ class App(tk.Tk):
         if self.db is None:
             return
 
-        playlists = self.db.get_playlists()
+        try:
+            playlists = self.db.get_playlists()
+        except Exception as exc:
+            logger.exception("Error loading playlists")
+            self.log(f"Error loading playlists: {exc}", "err")
+            self.log(
+                "The database may be encrypted. Install pyrekordbox with "
+                "SQLCipher support for Rekordbox 6/7 databases.",
+                "err",
+            )
+            messagebox.showerror(
+                "Database error",
+                f"Could not read playlists:\n{exc}\n\n"
+                "If this is a Rekordbox 6/7 database, it is encrypted.\n"
+                "Install pyrekordbox and sqlcipher3 to open it.",
+            )
+            return
+
         self._playlists = playlists
         for pl in playlists:
             self._playlist_map[pl.id] = pl
 
-        # Build tree hierarchy
-        for pl in playlists:
-            parent_iid = pl.parent_id if pl.parent_id and pl.parent_id in self._playlist_map else ""
-            icon = "📁 " if pl.is_folder else "🎵 "
-            self._pl_tree.insert(
-                parent_iid or "",
-                "end",
-                iid=pl.id,
-                text=f"{icon}{pl.name}",
-                open=True,
+        if not playlists:
+            self.log("No playlists found in the database.", "err")
+            messagebox.showinfo(
+                "No playlists",
+                "No playlists were found in this database.\n\n"
+                "Make sure the file is a valid Rekordbox master.db.",
             )
-        self.log(f"Loaded {len(playlists)} playlists.")
+            return
+
+        # Build tree hierarchy — insert parents before children.
+        # Playlists whose parent_id is not in the map go at the root level.
+        inserted = set()
+        to_insert = list(playlists)
+        while to_insert:
+            prev_count = len(inserted)
+            remaining = []
+            for pl in to_insert:
+                parent_iid = ""
+                if pl.parent_id and pl.parent_id in self._playlist_map:
+                    if pl.parent_id in inserted:
+                        parent_iid = pl.parent_id
+                    else:
+                        # Parent not yet inserted — defer
+                        remaining.append(pl)
+                        continue
+                icon = "📁 " if pl.is_folder else "🎵 "
+                try:
+                    self._pl_tree.insert(
+                        parent_iid,
+                        "end",
+                        iid=pl.id,
+                        text=f"{icon}{pl.name}",
+                        open=True,
+                    )
+                    inserted.add(pl.id)
+                except tk.TclError as exc:
+                    logger.debug("Could not insert playlist %s: %s", pl.id, exc)
+            to_insert = remaining
+            # If no progress was made this pass, force remaining at root level
+            if len(inserted) == prev_count and to_insert:
+                for pl in to_insert:
+                    icon = "📁 " if pl.is_folder else "🎵 "
+                    try:
+                        self._pl_tree.insert(
+                            "", "end", iid=pl.id,
+                            text=f"{icon}{pl.name}", open=True,
+                        )
+                        inserted.add(pl.id)
+                    except tk.TclError:
+                        pass
+                break
+
+        self.log(f"Loaded {len(inserted)} playlist(s).")
 
     def _on_playlist_select(self, _event=None) -> None:
         sel = self._pl_tree.selection()
@@ -392,6 +450,7 @@ class App(tk.Tk):
         self._active_playlist_id = sel[0]
         pl = self._playlist_map.get(self._active_playlist_id)
         if pl and pl.is_folder:
+            self._progress_var.set(f"📁 {pl.name} (folder – select a playlist inside)")
             return  # don't load track list for folders
         self._load_track_list()
         self._dl_all_btn.config(state="normal")
@@ -433,6 +492,8 @@ class App(tk.Tk):
 
     def _download_all(self) -> None:
         if self.db is None or self._active_playlist_id is None:
+            messagebox.showinfo("No playlist selected",
+                                "Please select a playlist first.")
             return
         if not self._tracks:
             messagebox.showinfo("No tracks", "No tracks in the selected playlist.")
@@ -445,9 +506,18 @@ class App(tk.Tk):
                                 "All tracks in this playlist are already FLAC!")
             return
 
+        # Confirm before batch download
+        if not messagebox.askyesno(
+            "Confirm download",
+            f"Replace {len(to_replace)} non-FLAC track(s) with FLAC versions?\n\n"
+            f"Download directory: {self.download_dir}",
+        ):
+            return
+
         self._dl_all_btn.config(state="disabled")
         self._add_track_btn.config(state="disabled")
         self.log(f"Starting batch download for {len(to_replace)} track(s) …")
+        self._progress_var.set(f"Preparing to download {len(to_replace)} track(s)…")
         threading.Thread(
             target=self._batch_download_worker, args=(to_replace,), daemon=True
         ).start()
@@ -538,6 +608,8 @@ class App(tk.Tk):
 
     def _open_search(self) -> None:
         if self.db is None or self._active_playlist_id is None:
+            messagebox.showinfo("No playlist selected",
+                                "Please select a playlist first.")
             return
         pl = self._playlist_map.get(self._active_playlist_id)
         if pl is None:
